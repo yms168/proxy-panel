@@ -187,6 +187,14 @@ async def unified_status():
     inbounds = get_inbounds_from_db()
     total_up, total_down = get_total_traffic()
 
+    # Get proxy server endpoints
+    proxy_endpoints = {}
+    try:
+        r = requests.get(f"{PROXY_POOL_URL}/api/proxy/status", timeout=5)
+        if r.ok: proxy_endpoints = r.json()
+    except:
+        pass
+
     with cache_lock:
         ip = cache.get("exit_ip")
         lat = cache.get("latency")
@@ -215,6 +223,7 @@ async def unified_status():
         "exit_ip": ip or "--",
         "latency": lat or "--",
         "inbounds": inbounds[:10],
+        "proxy_endpoints": proxy_endpoints,
     }
 
 
@@ -275,6 +284,15 @@ async def smart_connect():
 async def refresh_nodes():
     """Trigger a full proxy pool refresh."""
     return pool.fetch()
+
+@app.post("/api/unified/rotate")
+async def rotate_proxy():
+    """Rotate to a new upstream proxy."""
+    try:
+        r = requests.post(f"{PROXY_POOL_URL}/api/proxy/rotate", timeout=10)
+        return r.json()
+    except Exception as e:
+        raise HTTPException(500, f"Rotation failed: {e}")
 
 
 # ============================================================
@@ -353,6 +371,15 @@ code{background:#0d1117;padding:1px 6px;border-radius:4px;font-size:.82rem}
 <button class="btn" onclick="fetchAll()">🔄 抓取最新节点</button>
 <button class="btn" onclick="refreshAll()">📋 刷新状态</button>
 </div>
+<div class="section">
+<h2>🔌 代理订阅 / 出口</h2>
+<div class="btn-row" style="margin-bottom:8px">
+<button class="btn" onclick="rotateProxy()">🔄 切换出口 IP</button>
+</div>
+<div id="proxyEndpointsPanel" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px">
+<div class="msg">Loading...</div>
+</div>
+</div>
 <div class="section"><h2>🏆 最优候选节点（按延迟 + 住宅IP优先级排序）</h2><div id="bestPanel">点击 "智能最优连接" 选择最优出口...</div></div>
 <div class="section">
 <h2>📋 节点池</h2>
@@ -372,7 +399,48 @@ async function refreshAll(){const s=await api('/status');document.getElementById
 async function loadNodes(){const p=new URLSearchParams();const c=document.getElementById('fCountry').value;const t=document.getElementById('fType').value;const s=document.getElementById('fSort').value;if(c)p.set('country',c);if(t)p.set('ip_type',t);p.set('sort',s);p.set('limit',200);const d=await api('/nodes?'+p);const nodes=d.nodes||[];const q=(document.getElementById('fSearch')?.value||'').toLowerCase();const filtered=q?nodes.filter(n=>(n.ip||'').includes(q)||(n.country||'').toLowerCase().includes(q)||(n.isp||'').toLowerCase().includes(q)||(n.region||'').toLowerCase().includes(q)):nodes;let h='<table><thead><tr><th>状态</th><th>延迟</th><th>IP:端口</th><th>位置</th><th>ISP</th><th>类型</th><th>协议</th><th>评分</th></tr></thead><tbody>';if(filtered.length===0){h+='<tr><td colspan="8" class="msg">暂无节点，点击 "抓取最新节点" 获取</td></tr>'}else{for(const n of filtered.slice(0,80)){const alive=n.alive?'<span class="tag tag-live">在线</span>':'<span class="tag tag-dead">离线</span>';const type=n.ip_type==='residential'?'<span class="tag tag-res">🏠 住宅</span>':'<span class="tag tag-dc">🏢 机房</span>';const lat=n.latency_ms<9999?n.latency_ms+'ms':'超时';h+='<tr><td>'+alive+'</td><td>'+lat+'</td><td><code>'+n.ip+':'+n.port+'</code></td><td>'+(n.country||'?')+(n.region?' / '+n.region:'')+'</td><td>'+(n.isp||'--')+'</td><td>'+type+'</td><td>'+(n.protocol||'?').toUpperCase()+'</td><td>'+(n.score||0)+'</td></tr>'}}h+='</tbody></table>';document.getElementById('nodesTable').innerHTML=h}
 async function loadBest(){const d=await api('/best?count=10');const nodes=d.nodes||[];if(nodes.length===0){document.getElementById('bestPanel').innerHTML='<div class="msg">暂无节点，点击 "抓取最新节点" 获取</div>';return}let h='<table><thead><tr><th>#</th><th>延迟</th><th>IP:端口</th><th>位置</th><th>ISP</th><th>类型</th><th>评分</th></tr></thead><tbody>';nodes.forEach((n,i)=>{const type=n.ip_type==='residential'?'<span class="tag tag-res">🏠 住宅</span>':'<span class="tag tag-dc">🏢 机房</span>';h+='<tr><td>'+(i+1)+'</td><td>'+(n.latency_ms||'?')+'ms</td><td><code>'+n.ip+':'+n.port+'</code></td><td>'+(n.country||'?')+(n.region?' / '+n.region:'')+'</td><td>'+(n.isp||'--')+'</td><td>'+type+'</td><td>'+(n.score||0)+'</td></tr>'});h+='</tbody></table>';document.getElementById('bestPanel').innerHTML=h}
 async function smartConnect(){document.getElementById('bestPanel').innerHTML='<div class="msg">正在分析最优节点...</div>';const d=await api('/smart-connect',{method:'POST'});if(d.status==='connected'){const p=d.proxy;document.getElementById('bestPanel').innerHTML='<div class="ok-msg">✅ <b>已连接到最优节点</b><br><br>IP: <code>'+p.ip+':'+p.port+'</code> | '+(p.country||'?')+' | <span class="tag tag-res">'+(p.ip_type==='residential'?'🏠 住宅IP':'🏢 机房IP')+'</span> | 延迟: '+(p.latency_ms||'?')+'ms | ISP: '+(p.isp||'--')+'<br><br><small style="color:#8b949e">当前出口 IP: '+p.ip+'</small></div>'}else{document.getElementById('bestPanel').innerHTML='<div class="err-msg">连接失败: '+JSON.stringify(d)+'</div>'}refreshAll()}
-async function fetchAll(){document.getElementById('bestPanel').innerHTML='<div class="msg">⏳ 正在从多个源抓取最新节点...约需 30 秒</div>';await api('/refresh',{method:'POST'});document.getElementById('bestPanel').innerHTML='<div class="msg">抓取任务已启动，10 秒后刷新...</div>';setTimeout(()=>{loadNodes();loadBest();refreshAll()},10000)}
+function renderProxyEndpoints(ep){
+  if(!ep || !ep.active){
+    document.getElementById('proxyEndpointsPanel').innerHTML='<div class="msg">代理服务启动中...请稍后刷新</div>';
+    return;
+  }
+  const up=ep.upstream||{};
+  let h='';
+  h+='<div class="card" style="border-color:#3fb950">';
+  h+='<h3>SOCKS5 代理</h3><div class="val" style="font-size:1.2rem"><code>'+ep.socks5+'</code></div>';
+  h+='<div class="sub">当前上游: '+up.ip+':'+up.port+' ['+(up.country||'?')+'] '+up.latency+'ms</div></div>';
+  h+='<div class="card" style="border-color:#58a6ff">';
+  h+='<h3>HTTP 代理</h3><div class="val" style="font-size:1.2rem"><code>'+ep.http+'</code></div>';
+  h+='<div class="sub">浏览器/curl 直接使用 | 上游: '+up.ip+':'+up.port+'</div></div>';
+  document.getElementById('proxyEndpointsPanel').innerHTML=h;
+}
+async function rotateProxy(){
+  document.getElementById('proxyEndpointsPanel').innerHTML='<div class="msg">正在切换到新的住宅 IP...</div>';
+  const d=await api('/rotate',{method:'POST'});
+  if(d.success){
+    const up=d.upstream;
+    document.getElementById('proxyEndpointsPanel').innerHTML='<div class="ok-msg">切换到新出口: <code>'+up.ip+':'+up.port+'</code> ['+(up.country||'?')+'] '+up.latency+'ms</div>';
+  }else{
+    document.getElementById('proxyEndpointsPanel').innerHTML='<div class="err-msg">切换失败，请确认代理池中有可用节点</div>';
+  }
+  setTimeout(refreshAll,2000);
+}
+async function refreshAll(){
+  const s=await api('/status');
+  document.getElementById('proxy-dot').className='dot '+(s.proxy_ok?'online':'warn');
+  document.getElementById('proxy-st').textContent=s.proxy_ok?'Online':(s.proxy_total?'Partial':'No nodes');
+  document.getElementById('xray-dot').className='dot '+(s.xray_running?'online':'offline');
+  document.getElementById('xray-st').textContent=s.xray_running?'Active v'+(s.xray_version||'?'):'Down';
+  document.getElementById('exitIp').textContent=s.exit_ip||'--';
+  document.getElementById('latency').textContent=s.latency?s.latency+'ms':'--';
+  document.getElementById('totalNodes').textContent=s.proxy_alive;
+  document.getElementById('nodeSub').textContent='住宅: '+(s.proxy_residential||0)+' / 机房: '+(s.proxy_datacenter||0);
+  document.getElementById('traffic').textContent=(s.traffic_up_mb||0).toFixed(1)+' MB up / '+(s.traffic_down_mb||0).toFixed(1)+' MB down';
+  document.getElementById('exitIpSub').textContent=s.xray_running?'Xray v'+(s.xray_version||'?')+' | Inbounds: '+(s.inbounds_count||0):'';
+  renderProxyEndpoints(s.proxy_endpoints);
+  return s;
+}
+async function fetchAll(){document.getElementById('bestPanel').innerHTML='<div class="msg">正在从多个源抓取最新节点...约需 30 秒</div>';await api('/refresh',{method:'POST'});document.getElementById('bestPanel').innerHTML='<div class="msg">抓取任务已启动，10 秒后刷新...</div>';setTimeout(()=>{loadNodes();loadBest();refreshAll()},10000)}
 refreshAll();loadNodes();loadBest();setInterval(refreshAll,30000);
 </script>
 </body>

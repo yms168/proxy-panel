@@ -499,8 +499,11 @@ async def api_health():
 
 def background_loop():
     """Periodic fetch cycle every 15 minutes."""
-    # Initial fetch after 30s (let server start first)
-    time.sleep(30)
+    # Initial fetch after 3s (let server start)
+    time.sleep(3)
+    if len(pool.proxies) == 0:
+        log.info("Pool empty, running immediate initial fetch...")
+        run_fetch_cycle()
     while True:
         try:
             run_fetch_cycle()
@@ -518,6 +521,31 @@ if __name__ == "__main__":
 
     # Start background fetcher
     threading.Thread(target=background_loop, daemon=True).start()
+
+    # Import proxy server module
+    try:
+        from proxy_server import start as start_proxy_servers, get_proxy_status as _gs, rotate_upstream as _ru, set_pool
+
+        # Pass pool reference to proxy_server (avoids HTTP loopback)
+        set_pool(pool)
+
+        # Register proxy server API endpoints
+        @app.get("/api/proxy/status")
+        async def api_proxy_status():
+            return _gs()
+
+        @app.post("/api/proxy/rotate")
+        async def api_proxy_rotate():
+            return _ru()
+
+        # Start proxy servers after a delay (wait for uvicorn to be ready)
+        def delayed_start():
+            time.sleep(2)
+            start_proxy_servers()
+            log.info("Built-in proxy servers started (SOCKS5:1080, HTTP:1081)")
+        threading.Thread(target=delayed_start, daemon=True).start()
+    except ImportError as e:
+        log.warning(f"proxy_server not available: {e}")
 
     # Start API server
     port = int(os.environ.get("POOL_PORT", 5001))
