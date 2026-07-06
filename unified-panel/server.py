@@ -310,46 +310,43 @@ import base64 as _b64
 @app.get("/sub")
 async def subscription(format: str = "raw"):
     """
-    Subscription endpoint for proxy clients (V2RayN, Clash, Shadowrocket, etc.)
-    GET /sub            -> Raw VMess links (one per line)
-    GET /sub?format=clash -> Clash YAML config
-    GET /sub?format=base64 -> Base64-encoded VMess links
+    Subscription endpoint for V2RayN, Clash, Shadowrocket, etc.
+
+    Import this URL in your proxy client:
+        http://YOUR_IP:8888/sub
+
+    Formats:
+        /sub            -> VMess link (for V2RayN)
+        /sub?format=clash -> Clash YAML (for Clash/Mihomo)
+        /sub?format=base64 -> Base64 (for Shadowrocket)
     """
-    # Determine server IP
-    server_ip = SERVER_IP
-    if not server_ip:
-        # Try to get from request or from server
-        try:
-            server_ip = requests.get("http://ifconfig.me/ip", timeout=3).text.strip()
-        except:
-            server_ip = "103.79.184.54"
+    # Get server IP
+    server_ip = "103.79.184.54"
+    try:
+        r = requests.get("http://ifconfig.me/ip", timeout=3)
+        server_ip = r.text.strip()
+    except:
+        pass
 
-    vmess_config = {
-        "v": "2",
-        "ps": "ProxyPool-US-Residential",
-        "add": server_ip,
-        "port": str(VMESS_PORT),
-        "id": VMESS_CLIENT_ID,
-        "aid": "0",
-        "scy": "auto",
-        "net": "ws",
-        "type": "none",
-        "host": "",
-        "path": VMESS_WS_PATH,
-        "tls": "",
-        "sni": "",
-        "alpn": ""
+    vmess_uuid = VMESS_CLIENT_ID
+
+    # Build VMess config
+    vmess = {
+        "v": "2", "ps": "ProxyPool-Residential",
+        "add": server_ip, "port": str(VMESS_PORT),
+        "id": vmess_uuid, "aid": "0", "scy": "auto",
+        "net": "ws", "type": "none", "host": "",
+        "path": VMESS_WS_PATH, "tls": ""
     }
-
-    vmess_link = "vmess://" + _b64.b64encode(json.dumps(vmess_config, ensure_ascii=False).encode()).decode()
+    vmess_link = "vmess://" + _b64.b64encode(json.dumps(vmess, ensure_ascii=False).encode()).decode()
 
     if format == "clash":
-        clash_yaml = f"""proxies:
-  - name: "ProxyPool-US"
+        clash = f"""proxies:
+  - name: "ProxyPool-Residential"
     type: vmess
     server: {server_ip}
     port: {VMESS_PORT}
-    uuid: {VMESS_CLIENT_ID}
+    uuid: {vmess_uuid}
     alterId: 0
     cipher: auto
     network: ws
@@ -359,16 +356,15 @@ proxy-groups:
   - name: "Proxy"
     type: select
     proxies:
-      - ProxyPool-US
+      - ProxyPool-Residential
 rules:
   - MATCH,Proxy
 """
-        return HTMLResponse(content=clash_yaml, media_type="text/plain")
+        return HTMLResponse(content=clash, media_type="text/plain")
 
     if format == "base64":
         return HTMLResponse(content=_b64.b64encode(vmess_link.encode()).decode(), media_type="text/plain")
 
-    # Default: raw VMess link
     return HTMLResponse(content=vmess_link, media_type="text/plain")
 
 
@@ -490,7 +486,22 @@ code{background:#0d1117;padding:1px 6px;border-radius:4px;font-size:.82rem}
 <button class="btn" onclick="refreshAll()">📋 刷新状态</button>
 </div>
 <div class="section">
-<h2>🔌 代理订阅 / 出口</h2>
+<h2>🔗 订阅链接（导入 V2RayN / Clash / Shadowrocket）</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:10px">
+<div class="card" style="border-color:#3fb950">
+<h3>V2RayN / v2rayNG</h3>
+<div style="font-size:0.9rem;word-break:break-all"><code id="subUrl">http://IP:8888/sub</code></div>
+<button class="btn" style="margin-top:8px;font-size:0.8rem" onclick="navigator.clipboard.writeText(document.getElementById('subUrl').textContent)">📋 复制</button>
+</div>
+<div class="card" style="border-color:#58a6ff">
+<h3>Clash / Mihomo</h3>
+<div style="font-size:0.9rem;word-break:break-all"><code id="clashUrl">http://IP:8888/sub?format=clash</code></div>
+<button class="btn" style="margin-top:8px;font-size:0.8rem" onclick="navigator.clipboard.writeText(document.getElementById('clashUrl').textContent)">📋 复制</button>
+</div>
+</div>
+</div>
+<div class="section">
+<h2>🔌 代理出口（直接使用）</h2>
 <div class="btn-row" style="margin-bottom:8px">
 <button class="btn" onclick="rotateProxy()">🔄 切换出口 IP</button>
 </div>
@@ -556,6 +567,10 @@ async function refreshAll(){
   document.getElementById('traffic').textContent=(s.traffic_up_mb||0).toFixed(1)+' MB up / '+(s.traffic_down_mb||0).toFixed(1)+' MB down';
   document.getElementById('exitIpSub').textContent=s.xray_running?'Xray v'+(s.xray_version||'?')+' | Inbounds: '+(s.inbounds_count||0):'';
   renderProxyEndpoints(s.proxy_endpoints);
+  // Update subscription URLs with real IP
+  const ip=s.exit_ip||location.hostname;
+  document.getElementById('subUrl').textContent='http://'+ip+':8888/sub';
+  document.getElementById('clashUrl').textContent='http://'+ip+':8888/sub?format=clash';
   return s;
 }
 async function fetchAll(){document.getElementById('bestPanel').innerHTML='<div class="msg">正在从多个源抓取最新节点...约需 30 秒</div>';await api('/refresh',{method:'POST'});document.getElementById('bestPanel').innerHTML='<div class="msg">抓取任务已启动，10 秒后刷新...</div>';setTimeout(()=>{loadNodes();loadBest();refreshAll()},10000)}
