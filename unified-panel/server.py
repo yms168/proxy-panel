@@ -296,6 +296,124 @@ async def rotate_proxy():
 
 
 # ============================================================
+# Subscription Endpoint
+# ============================================================
+
+# VMess inbound info (matches what we set up in 3x-ui)
+VMESS_PORT = 10000
+VMESS_CLIENT_ID = "45e3d998-89f1-458c-be77-0753a8818d50"
+VMESS_WS_PATH = "/proxy"
+SERVER_IP = os.environ.get("SERVER_IP", "")
+
+import base64 as _b64
+
+@app.get("/sub")
+async def subscription(format: str = "raw"):
+    """
+    Subscription endpoint for proxy clients (V2RayN, Clash, Shadowrocket, etc.)
+    GET /sub            -> Raw VMess links (one per line)
+    GET /sub?format=clash -> Clash YAML config
+    GET /sub?format=base64 -> Base64-encoded VMess links
+    """
+    # Determine server IP
+    server_ip = SERVER_IP
+    if not server_ip:
+        # Try to get from request or from server
+        try:
+            server_ip = requests.get("http://ifconfig.me/ip", timeout=3).text.strip()
+        except:
+            server_ip = "103.79.184.54"
+
+    vmess_config = {
+        "v": "2",
+        "ps": "ProxyPool-US-Residential",
+        "add": server_ip,
+        "port": str(VMESS_PORT),
+        "id": VMESS_CLIENT_ID,
+        "aid": "0",
+        "scy": "auto",
+        "net": "ws",
+        "type": "none",
+        "host": "",
+        "path": VMESS_WS_PATH,
+        "tls": "",
+        "sni": "",
+        "alpn": ""
+    }
+
+    vmess_link = "vmess://" + _b64.b64encode(json.dumps(vmess_config, ensure_ascii=False).encode()).decode()
+
+    if format == "clash":
+        clash_yaml = f"""proxies:
+  - name: "ProxyPool-US"
+    type: vmess
+    server: {server_ip}
+    port: {VMESS_PORT}
+    uuid: {VMESS_CLIENT_ID}
+    alterId: 0
+    cipher: auto
+    network: ws
+    ws-opts:
+      path: {VMESS_WS_PATH}
+proxy-groups:
+  - name: "Proxy"
+    type: select
+    proxies:
+      - ProxyPool-US
+rules:
+  - MATCH,Proxy
+"""
+        return HTMLResponse(content=clash_yaml, media_type="text/plain")
+
+    if format == "base64":
+        return HTMLResponse(content=_b64.b64encode(vmess_link.encode()).decode(), media_type="text/plain")
+
+    # Default: raw VMess link
+    return HTMLResponse(content=vmess_link, media_type="text/plain")
+
+
+@app.get("/api/unified/subscription")
+async def subscription_info():
+    """Get subscription information and links."""
+    server_ip = SERVER_IP
+    if not server_ip:
+        try:
+            server_ip = requests.get("http://ifconfig.me/ip", timeout=3).text.strip()
+        except:
+            server_ip = "103.79.184.54"
+
+    vmess_config = {
+        "v": "2",
+        "ps": "ProxyPool-US-Residential",
+        "add": server_ip,
+        "port": str(VMESS_PORT),
+        "id": VMESS_CLIENT_ID,
+        "aid": "0",
+        "scy": "auto",
+        "net": "ws",
+        "type": "none",
+        "host": "",
+        "path": VMESS_WS_PATH,
+        "tls": "",
+    }
+    vmess_link = "vmess://" + _b64.b64encode(json.dumps(vmess_config, ensure_ascii=False).encode()).decode()
+
+    return {
+        "vmess_link": vmess_link,
+        "subscription_url": f"http://{server_ip}:8888/sub",
+        "clash_subscription": f"http://{server_ip}:8888/sub?format=clash",
+        "base64_subscription": f"http://{server_ip}:8888/sub?format=base64",
+        "server_ip": server_ip,
+        "vmess_port": VMESS_PORT,
+        "socks5_proxy": f"{server_ip}:10808",
+        "http_proxy": f"{server_ip}:10809",
+        "direct_socks5": f"{server_ip}:1080",
+        "direct_http": f"{server_ip}:1081",
+        "note": "Use the subscription URL in V2RayN/Clash/Shadowrocket clients"
+    }
+
+
+# ============================================================
 # Dashboard HTML (Single Page App)
 # ============================================================
 
