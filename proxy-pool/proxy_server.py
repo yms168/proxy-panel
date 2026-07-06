@@ -114,15 +114,32 @@ def handle_socks5_client(client_sock, client_addr):
         dst_port_data = client_sock.recv(2)
         dst_port = struct.unpack('>H', dst_port_data)[0]
 
-        if cmd == 1:  # CONNECT
-            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_sock.settimeout(15)
-            target_sock.connect((dst_addr, dst_port))
+        if cmd == 1:  # CONNECT - route through upstream proxy
+            # Connect to upstream SOCKS5 proxy
+            up = get_upstream()
+            up_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            up_sock.settimeout(10)
+            up_sock.connect((up["ip"], up["port"]))
 
+            # SOCKS5 handshake with upstream
+            up_sock.send(b'\x05\x01\x00')
+            up_sock.recv(2)
+
+            # Ask upstream to connect to target
+            req = b'\x05\x01\x00\x03' + bytes([len(dst_addr)]) + dst_addr.encode() + struct.pack('>H', dst_port)
+            up_sock.send(req)
+            resp = up_sock.recv(10)
+            if len(resp) < 2 or resp[1] != 0x00:
+                up_sock.close()
+                client_sock.send(b'\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00')
+                return
+
+            # Reply success to client
             bind_addr = b'\x00' + socket.inet_aton('0.0.0.0') + struct.pack('>H', 0)
             client_sock.send(b'\x05\x00\x00' + b'\x01' + bind_addr)
 
-            relay(client_sock, target_sock)
+            # Relay client <-> upstream <-> target
+            relay(client_sock, up_sock)
         else:
             client_sock.send(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
 
@@ -202,12 +219,23 @@ def handle_http_client(client_sock, client_addr):
             host = host_port[0]
             port = int(host_port[1]) if len(host_port) > 1 else 443
 
-            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_sock.settimeout(15)
-            target_sock.connect((host, port))
+            # Connect through upstream SOCKS5
+            up = get_upstream()
+            up_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            up_sock.settimeout(10)
+            up_sock.connect((up["ip"], up["port"]))
+            up_sock.send(b'\x05\x01\x00')
+            up_sock.recv(2)
+            req = b'\x05\x01\x00\x03' + bytes([len(host)]) + host.encode() + struct.pack('>H', port)
+            up_sock.send(req)
+            resp = up_sock.recv(10)
+            if len(resp) < 2 or resp[1] != 0x00:
+                up_sock.close()
+                client_sock.send(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+                return
 
             client_sock.send(b'HTTP/1.1 200 Connection Established\r\n\r\n')
-            relay(client_sock, target_sock)
+            relay(client_sock, up_sock)
         else:
             # Regular HTTP
             host = None
