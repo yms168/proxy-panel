@@ -258,25 +258,98 @@ async def best_nodes(count: int = Query(10)):
 
 @app.post("/api/unified/smart-connect")
 async def smart_connect():
-    """Pick the best residential proxy and return connection info."""
+    """
+    Smart Connect: pick the best residential proxy and configure Xray routing.
+
+    1. Selects best residential proxy from pool
+    2. Updates Xray config to add it as SOCKS5 outbound
+    3. Sets routing rule: inbound traffic → proxy outbound
+    4. Reloads Xray to apply changes
+    """
     best = pool.best(count=1).get("proxies", [])
     if not best:
         raise HTTPException(500, "No proxies available. Click 'Refresh Nodes' first.")
 
     proxy = best[0]
+
+    # Update cache
     with cache_lock:
         cache["exit_ip"] = proxy["ip"]
         cache["latency"] = str(proxy.get("latency_ms", "--"))
         cache["ts"] = time.time()
 
+    # ============================================================
+    # Xray routing: permanent outbound to proxy pool SOCKS5 (127.0.0.1:1080)
+    # The proxy pool auto-rotates the upstream, so Xray config stays static
+    # ============================================================
+    result_note = ""
+    try:
+        import subprocess as sp
+
+        cfg_path = "/usr/local/x-ui/bin/config.json"
+
+        # Read current config
+        result = sp.run(["cat", cfg_path], capture_output=True, text=True, timeout=5)
+        cfg = json.loads(result.stdout)
+
+        # Add permanent SOCKS5 outbound to our proxy pool
+        pool_outbound_tag = "proxy-pool"
+        pool_outbound = {
+            "protocol": "socks",
+            "tag": pool_outbound_tag,
+            "settings": {
+                "servers": [{"address": "127.0.0.1", "port": 1080}]
+            }
+        }
+
+        # Ensure pool outbound exists (idempotent)
+        outbounds = cfg.get("outbounds", [])
+        existing = [o for o in outbounds if o.get("tag") == pool_outbound_tag]
+        if not existing:
+            outbounds.insert(1, pool_outbound)  # After direct
+            cfg["outbounds"] = outbounds
+
+        # Ensure routing rule exists
+        if "routing" not in cfg:
+            cfg["routing"] = {"domainStrategy": "AsIs", "rules": []}
+        rules = cfg["routing"]["rules"]
+
+        existing_rule = any(
+            r.get("outboundTag") == pool_outbound_tag for r in rules
+        )
+        if not existing_rule:
+            rules.insert(0, {
+                "type": "field",
+                "inboundTag": ["inbound-vmess", "inbound-socks"],
+                "outboundTag": pool_outbound_tag
+            })
+            cfg["routing"]["rules"] = rules
+
+        # Write config
+        with open("/tmp/xray_config_new.json", "w") as f:
+            json.dump(cfg, f, indent=2)
+        sp.run(["cp", "/tmp/xray_config_new.json", cfg_path], check=True, timeout=5)
+
+        # Restart xray directly (not x-ui): kill old + start new with updated config
+        sp.run(["pkill", "-9", "-f", "xray-linux-amd64"], check=False, timeout=5)
+        sp.run(["sleep", "1"], check=False, timeout=5)
+        # Start xray in background with new config
+        sp.run(["nohup", "/usr/local/x-ui/bin/xray-linux-amd64", "-c", cfg_path, ">/dev/null", "2>&1", "&"], check=False, timeout=5)
+        # Wait for it to start
+        sp.run(["sleep", "2"], check=False, timeout=5)
+
+        result_note = (
+            f"Routing: VMess/SOCKS5 inbound -> proxy pool (127.0.0.1:1080) -> "
+            f"{proxy['ip']}:{proxy['port']} ({proxy.get('country','?')}, {proxy.get('latency_ms','?')}ms)"
+        )
+    except Exception as e:
+        result_note = f"Proxy selected OK, but Xray routing setup failed: {str(e)[:100]}"
+        log.error(f"Smart-connect Xray setup error: {e}")
+
     return {
         "status": "connected",
         "proxy": proxy,
-        "note": (
-            f"Best residential proxy selected: {proxy['ip']}:{proxy['port']} "
-            f"({proxy.get('country', '?')}, {proxy.get('latency_ms', '?')}ms). "
-            f"Configure this as your Xray outbound for proxying."
-        )
+        "note": result_note
     }
 
 
@@ -301,7 +374,7 @@ async def rotate_proxy():
 
 # VMess inbound info (matches what we set up in 3x-ui)
 VMESS_PORT = 10000
-VMESS_CLIENT_ID = "45e3d998-89f1-458c-be77-0753a8818d50"
+VMESS_CLIENT_ID = "9020db93-fef9-4979-8901-3db9965293eb"
 VMESS_WS_PATH = "/proxy"
 SERVER_IP = os.environ.get("SERVER_IP", "")
 
